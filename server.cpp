@@ -38,16 +38,17 @@ int main(int argc , char* argv[]){
     }
 
     cout << "Server running on " << port << endl;
-    int client_fd = accept(sock_fd,NULL,NULL);
-    char buffer[1024];
     while(true){
-
-        memset(buffer, 0 , sizeof(buffer));
-        int r = read(client_fd,buffer, sizeof(buffer));
-        if(r <= 0) break;
-
-        cout << "C: " << buffer << endl;
-        send(client_fd,buffer, strlen(buffer),0);
+        int client_fd = accept(sock_fd,NULL,NULL);
+        char buffer[1024];
+        while(true){
+            memset(buffer, 0 , sizeof(buffer));
+            int r = read(client_fd,buffer, sizeof(buffer));
+            if(r <= 0) break;
+            
+            cout << "C: " << buffer << endl;
+            send(client_fd,buffer, strlen(buffer),0);
+        }
+        close(client_fd);
     }
-    close(client_fd);
 }
