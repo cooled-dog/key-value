@@ -10,10 +10,94 @@
 #include<thread>
 #include<mutex>
 #include<semaphore.h>
+#include<chrono>
 
 using namespace std;
-mutex store_mtx;
+mutex mtx;
 unordered_map<string,string> store;
+unordered_map<string,chrono::steady_clock::time_point> expiry;
+
+void funcTIMELEFT(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer, "%*s %s", key);
+    bool found;
+    {
+        lock_guard<mutex> lock(mtx);
+        auto exp = expiry.find(key);
+        found = (exp != expiry.end());
+        if(found){
+            if(exp->second >= chrono::steady_clock::now()) 
+                found = false;
+        }
+    }
+    if(found){
+        auto timestamp = expiry[key] - chrono::steady_clock::now();
+        auto timeleft = chrono::duration_cast<chrono::seconds>(timestamp).count();
+        string str= to_string(timeleft);
+        send(fd, str.c_str(), str.size(), 0); 
+    }
+    else send(fd, "NULL\n", 5, 0);
+}
+
+void funcSET(char buffer[], int fd){
+    char key[100] , value[100];
+    sscanf(buffer, "%*s %s %[^\n]", key, value);
+    {
+        lock_guard<mutex> lock(mtx);
+        store[key] = value;
+    }        
+    send(fd, "OK\n", 3, 0);
+}
+
+void funcEXPIRE(char buffer[], int fd){
+    char key[100];
+    int value;
+    sscanf(buffer, "%*s %s %d", key, &value);
+    {
+        lock_guard<mutex> lock(mtx);
+        auto it = store.find(key);
+        if(it == store.end()){
+            send(fd, "entry not found!\n", 17, 0);
+            return;
+        }
+        expiry[key] = chrono::steady_clock::now() + chrono::seconds(value);
+    }
+    send(fd, "OK\n", 3, 0);
+}
+
+void funcGET(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer,"%*s %s", key);
+    
+    lock_guard<mutex> lock(mtx);
+    auto it = store.find(key);
+    if(it == store.end()){
+        send(fd, "NULL\n", 5, 0);
+        return;
+    }
+    auto exp = expiry.find(key);
+    if(exp != expiry.end() && chrono::steady_clock::now() >= exp->second){
+        store.erase(key);
+        expiry.erase(key);
+        send(fd, "NULL\n", 5, 0);   
+    }
+    else{
+        send(fd, it->second.c_str(), it->second.size(), 0);
+        send(fd, "\n", 1, 0);
+    }
+}
+
+void funcDEL(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer,"%*s %s", key);
+    {
+        lock_guard<mutex> lock(mtx);
+        store.erase(key);
+        if(expiry.find(key) != expiry.end())
+            expiry.erase(key);
+    }
+    send(fd, "OK\n", 3, 0);
+}
 
 void handleClient(int client_fd){
     char buffer[1024];
@@ -26,37 +110,12 @@ void handleClient(int client_fd){
         char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
         sscanf(buffer,"%s", cmd);
         
-        if(strcmp(cmd, "SET") == 0){
-            sscanf(buffer, "%*s %s %[^\n]", key , value);
-            {
-            lock_guard<mutex> lock(store_mtx); 
-               store[key] = value;
-            }
-            send(client_fd, "OK\n", 3, 0);
-        }
-        else if(strcmp(cmd, "GET") == 0){
-            sscanf(buffer, "%*s %s", key);
-
-            lock_guard<mutex> lock(store_mtx);
-            if(store.count(key)){
-                send(client_fd, store[key].c_str(), store[key].size() , 0);
-                send(client_fd, "\n", 1, 0);
-            }
-            else{
-                send(client_fd, "NULL\n", 5, 0);
-            }
-        }
-        else if(strcmp(cmd, "DEL") == 0){
-            sscanf(buffer, "%*s %s", key);
-            {
-                lock_guard<mutex> lock(store_mtx);
-                store.erase(key);
-            }
-            send(client_fd,"OK\n", 3, 0);
-        }
-        else{
-            send(client_fd,"Unknow argument \n", 17, 0);
-        }
+        if(strcmp(cmd,"SET") == 0) funcSET(buffer,client_fd);
+        else if(strcmp(cmd,"GET") == 0) funcGET(buffer,client_fd);
+        else if(strcmp(cmd,"DEL") == 0) funcDEL(buffer,client_fd);
+        else if(strcmp(cmd,"EXPIRE") == 0) funcEXPIRE(buffer,client_fd);
+        else if(strcmp(cmd,"TIMELEFT") == 0) funcTIMELEFT(buffer,client_fd);
+        else send(client_fd, "command not found!!\n", 20, 0);
     }
     close(client_fd);
 
