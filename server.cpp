@@ -7,9 +7,62 @@
 #include<string>
 #include<cstring>
 #include<unordered_map>
-using namespace std;
+#include<thread>
+#include<mutex>
+#include<semaphore.h>
 
+using namespace std;
+mutex store_mtx;
+unordered_map<string,string> store;
+
+void handleClient(int client_fd){
+    char buffer[1024];
+    while(true){
+        memset(buffer, 0 , sizeof(buffer));
+        
+        int r = read(client_fd,buffer, sizeof(buffer));
+        if(r <= 0) break;
+
+        char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
+        sscanf(buffer,"%s", cmd);
+        
+        if(strcmp(cmd, "SET") == 0){
+            sscanf(buffer, "%*s %s %[^\n]", key , value);
+            {
+            lock_guard<mutex> lock(store_mtx); 
+               store[key] = value;
+            }
+            send(client_fd, "OK\n", 3, 0);
+        }
+        else if(strcmp(cmd, "GET") == 0){
+            sscanf(buffer, "%*s %s", key);
+
+            lock_guard<mutex> lock(store_mtx);
+            if(store.count(key)){
+                send(client_fd, store[key].c_str(), store[key].size() , 0);
+                send(client_fd, "\n", 1, 0);
+            }
+            else{
+                send(client_fd, "NULL\n", 5, 0);
+            }
+        }
+        else if(strcmp(cmd, "DEL") == 0){
+            sscanf(buffer, "%*s %s", key);
+            {
+                lock_guard<mutex> lock(store_mtx);
+                store.erase(key);
+            }
+            send(client_fd,"OK\n", 3, 0);
+        }
+        else{
+            send(client_fd,"Unknow argument \n", 17, 0);
+        }
+    }
+    close(client_fd);
+
+}
 int main(int argc , char* argv[]){
+    
     if(argc < 2){
         fprintf(stderr, "Port not mentioned, code terminated \n");
         exit(1);
@@ -37,44 +90,14 @@ int main(int argc , char* argv[]){
         perror("listen failed");
         exit(1);
     }
-    
     cout << "Server running on " << port << endl;
     
-    unordered_map<string,string> store;
-    while(true){
+      while(true){
         int client_fd = accept(sock_fd,NULL,NULL);
-        char buffer[1024];
-        while(true){
-            memset(buffer, 0 , sizeof(buffer));
-            int r = read(client_fd,buffer, sizeof(buffer));
-            if(r <= 0) break;
-            char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
-            sscanf(buffer,"%s", cmd);
+        if(client_fd < 0) perror("accept failed");
+        else printf("Connected\n ");
 
-            if(strcmp(cmd, "SET") == 0){
-                sscanf(buffer, "%*s %s %[^\n]", key , value);
-                store[key] = value;
-                send(client_fd, "OK\n", 3, 0);
-            }
-            else if(strcmp(cmd, "GET") == 0){
-                sscanf(buffer, "%*s %s", key);
-                if(store.count(key)){
-                    send(client_fd, store[key].c_str(), store[key].size() , 0);
-                    send(client_fd, "\n", 1, 0);
-                }
-                else{
-                    send(client_fd, "NULL\n", 5, 0);
-                }
-            }
-            else if(strcmp(cmd, "DEL") == 0){
-                sscanf(buffer, "%*s %s", key);
-                store.erase(key);
-                send(client_fd,"OK\n", 3, 0);
-            }
-            else{
-                send(client_fd,"Unknow argument \n", 17, 0);
-            }
-        }
-        close(client_fd);
+        thread t(handleClient,client_fd);
+        t.detach();
     }
 }
