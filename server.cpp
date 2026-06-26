@@ -17,27 +17,31 @@ mutex mtx;
 unordered_map<string,string> store;
 unordered_map<string,chrono::steady_clock::time_point> expiry;
 
-void funcTIMELEFT(char buffer[], int fd){
-    char key[100];
-    sscanf(buffer, "%*s %s", key);
-    bool found;
-    {
-        lock_guard<mutex> lock(mtx);
-        auto exp = expiry.find(key);
-        found = (exp != expiry.end());
-        if(found){
-            if(exp->second >= chrono::steady_clock::now()) 
-                found = false;
-        }
-    }
-    if(found){
-        auto timestamp = expiry[key] - chrono::steady_clock::now();
-        auto timeleft = chrono::duration_cast<chrono::seconds>(timestamp).count();
-        string str= to_string(timeleft);
-        send(fd, str.c_str(), str.size(), 0); 
-    }
-    else send(fd, "NULL\n", 5, 0);
-}
+// void funcTIMELEFT(char buffer[], int fd){
+//     char key[100];
+//     sscanf(buffer, "%*s %s", key);
+//     bool found;
+//     {
+//         lock_guard<mutex> lock(mtx);
+//         auto exp = expiry.find(key);
+//         found = (exp != expiry.end());
+//         if(found){
+//             if(exp->second <= chrono::steady_clock::now()) 
+//                 found = false;
+//         }
+//     }
+//     if(found){
+//         string str;
+//         {
+//             lock_guard<mutex> lock(mtx);
+//             auto timestamp = expiry[key] - chrono::steady_clock::now();
+//             auto timeleft = chrono::duration_cast<chrono::seconds>(timestamp).count();
+//             str= to_string(timeleft);
+//         }
+//         send(fd, str.c_str(), str.size(), 0); 
+//     }
+//     else send(fd, "NULL\n", 5, 0); ????????
+// }
 
 void funcSET(char buffer[], int fd){
     char key[100] , value[100];
@@ -114,7 +118,7 @@ void handleClient(int client_fd){
         else if(strcmp(cmd,"GET") == 0) funcGET(buffer,client_fd);
         else if(strcmp(cmd,"DEL") == 0) funcDEL(buffer,client_fd);
         else if(strcmp(cmd,"EXPIRE") == 0) funcEXPIRE(buffer,client_fd);
-        else if(strcmp(cmd,"TIMELEFT") == 0) funcTIMELEFT(buffer,client_fd);
+        // else if(strcmp(cmd,"TIMELEFT") == 0) funcTIMELEFT(buffer,client_fd); TT
         else send(client_fd, "command not found!!\n", 20, 0);
     }
     close(client_fd);
