@@ -12,7 +12,7 @@ int main(){
     int sock_fd = socket(AF_INET,SOCK_STREAM,0);
     if(sock_fd < 0){
         perror("socket failed");
-        exit;
+        exit(1);
     }
     cout << "Server waiting on port 9090" << endl;
     sockaddr_in addr{};
@@ -33,7 +33,7 @@ int main(){
         if(r <= 0) break;
 
         cout << "Client : " << buffer << endl;
-        send(client_fd,buffer,strlen(buffer),0);
+        send(client_fd,buffer,r,0);
     }
     close(client_fd);
 }
