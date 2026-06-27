@@ -15,29 +15,128 @@
 
 using namespace std;
 
-class KVstore{
-private:
-    mutex mtx;
-    unordered_map<string,string> store;
-    unordered_map<string,chrono::steady_clock::time_point> expiry;
-public:
-    void funcSET(char buffer[], int fd);
-    void funcGET(char buffer[], int fd);
-    void funcDEL(char buffer[], int fd);
-    void funcEXPIRE(char buffer[], int fd);
+class LRUcache{
+    private:
+        mutex mtx;
+        unordered_map<string,chrono::steady_clock::time_point> expiry;
+        unordered_map<string, pair<string,list<string>::iterator>> store;
+        
+        int capacity;
+        list<string> dll;
+
+        void checkRemove(){
+            if(store.size() > capacity){
+                string temp = dll.back();
+                dll.pop_back();
+                store.erase(temp);
+                expiry.erase(temp);
+            }
+        }
+    public:
+        LRUcache(int cap) : capacity(cap){}
+        void funcSET(char buffer[], int fd);
+        void funcGET(char buffer[], int fd);
+        void funcDEL(char buffer[], int fd);
+        void funcEXPIRE(char buffer[], int fd);
 };
 
-void KVstore::funcSET(char buffer[], int fd){
+class KVstore{
+    private:
+        LRUcache cache;
+        
+    public:
+        KVstore(int cap) : cache(cap){}
+        void handleClient(int client_fd);
+};
+
+void KVstore::handleClient(int client_fd){
+    char buffer[1024];
+    while(true){
+        memset(buffer, 0 , sizeof(buffer));
+        
+        int r = read(client_fd,buffer, sizeof(buffer));
+        if(r <= 0) break;
+
+        char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
+        sscanf(buffer,"%s", cmd);
+        
+        if(strcmp(cmd,"SET") == 0){
+            cache.funcSET(buffer,client_fd);
+        }
+        else if(strcmp(cmd,"GET") == 0){ 
+            cache.funcGET(buffer,client_fd);
+        }
+        else if(strcmp(cmd,"DEL") == 0){
+            cache.funcDEL(buffer,client_fd);
+        }
+        else if(strcmp(cmd,"EXPIRE") == 0){
+            cache.funcEXPIRE(buffer,client_fd);
+        }
+        else send(client_fd, "command not found!!\n", 20, 0);
+    }
+    close(client_fd);
+}
+
+void LRUcache::funcSET(char buffer[], int fd){
     char key[100] , value[100];
     sscanf(buffer, "%*s %s %[^\n]", key, value);
     {
         lock_guard<mutex> lock(mtx);
-        store[key] = value;
-    }        
+        if(store.find(key) != store.end())
+            dll.erase(store[key].second);
+
+        dll.push_front(key);
+        store[key] = {value, dll.begin()};
+        checkRemove();
+    }
     send(fd, "OK\n", 3, 0);
 }
 
-void KVstore::funcEXPIRE(char buffer[], int fd){
+void LRUcache::funcGET(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer,"%*s %s", key);
+    
+    lock_guard<mutex> lock(mtx);
+
+    auto it = store.find(key);
+    if(it == store.end()){
+        send(fd, "NULL\n", 5, 0);
+        return;
+    }
+    auto exp = expiry.find(key);
+    if(exp != expiry.end() && chrono::steady_clock::now() >= exp->second){
+        dll.erase(it->second.second);
+        store.erase(key);
+        expiry.erase(key);
+        send(fd, "NULL\n", 5, 0);
+        return;
+    }
+    else{
+        send(fd, it->second.first.c_str(), it->second.first.size(), 0);
+        send(fd, "\n", 1, 0);
+    }
+    dll.erase(it->second.second);
+    dll.push_front(key);
+    it->second.second = dll.begin();
+}
+
+void LRUcache::funcDEL(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer,"%*s %s", key);
+    {
+        lock_guard<mutex> lock(mtx);
+        if(store.find(key) != store.end()){
+            auto it = store.find(key);
+            dll.erase(it->second.second);
+            store.erase(it);
+        }
+        if(expiry.find(key) != expiry.end())
+            expiry.erase(key);
+    }
+    send(fd, "OK\n", 3, 0);
+}
+
+void LRUcache::funcEXPIRE(char buffer[], int fd){
     char key[100];
     int value;
     sscanf(buffer, "%*s %s %d", key, &value);
@@ -53,64 +152,7 @@ void KVstore::funcEXPIRE(char buffer[], int fd){
     send(fd, "OK\n", 3, 0);
 }
 
-void KVstore::funcGET(char buffer[], int fd){
-    char key[100];
-    sscanf(buffer,"%*s %s", key);
-    
-    lock_guard<mutex> lock(mtx);
-    auto it = store.find(key);
-    if(it == store.end()){
-        send(fd, "NULL\n", 5, 0);
-        return;
-    }
-    auto exp = expiry.find(key);
-    if(exp != expiry.end() && chrono::steady_clock::now() >= exp->second){
-        store.erase(key);
-        expiry.erase(key);
-        send(fd, "NULL\n", 5, 0);   
-    }
-    else{
-        send(fd, it->second.c_str(), it->second.size(), 0);
-        send(fd, "\n", 1, 0);
-    }
-}
-
-void KVstore::funcDEL(char buffer[], int fd){
-    char key[100];
-    sscanf(buffer,"%*s %s", key);
-    {
-        lock_guard<mutex> lock(mtx);
-        store.erase(key);
-        if(expiry.find(key) != expiry.end())
-            expiry.erase(key);
-    }
-    send(fd, "OK\n", 3, 0);
-}
-
-void handleClient(int client_fd){
-    KVstore kv;
-
-    char buffer[1024];
-    while(true){
-        memset(buffer, 0 , sizeof(buffer));
-        
-        int r = read(client_fd,buffer, sizeof(buffer));
-        if(r <= 0) break;
-
-        char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
-        sscanf(buffer,"%s", cmd);
-        
-        if(strcmp(cmd,"SET") == 0) kv.funcSET(buffer,client_fd);
-        else if(strcmp(cmd,"GET") == 0) kv.funcGET(buffer,client_fd);
-        else if(strcmp(cmd,"DEL") == 0) kv.funcDEL(buffer,client_fd);
-        else if(strcmp(cmd,"EXPIRE") == 0) kv.funcEXPIRE(buffer,client_fd);
-        else send(client_fd, "command not found!!\n", 20, 0);
-    }
-    close(client_fd);
-}
-
 int main(int argc , char* argv[]){
-    
     if(argc < 2){
         fprintf(stderr, "Port not mentioned, code terminated \n");
         exit(1);
@@ -140,12 +182,13 @@ int main(int argc , char* argv[]){
     }
     cout << "Server running on " << port << endl;
     
+    KVstore kv(2);
     while(true){
         int client_fd = accept(sock_fd,NULL,NULL);
         if(client_fd < 0) perror("accept failed");
         else printf("Connected\n ");
 
-        thread t(handleClient,client_fd);
+        thread t(&KVstore::handleClient,&kv,client_fd);
         t.detach();
     }
 }
