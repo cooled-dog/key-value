@@ -11,39 +11,23 @@
 #include<mutex>
 #include<semaphore.h>
 #include<chrono>
+#include<list>
 
 using namespace std;
-mutex mtx;
-unordered_map<string,string> store;
-unordered_map<string,chrono::steady_clock::time_point> expiry;
 
-// void funcTIMELEFT(char buffer[], int fd){
-//     char key[100];
-//     sscanf(buffer, "%*s %s", key);
-//     bool found;
-//     {
-//         lock_guard<mutex> lock(mtx);
-//         auto exp = expiry.find(key);
-//         found = (exp != expiry.end());
-//         if(found){
-//             if(exp->second <= chrono::steady_clock::now()) 
-//                 found = false;
-//         }
-//     }
-//     if(found){
-//         string str;
-//         {
-//             lock_guard<mutex> lock(mtx);
-//             auto timestamp = expiry[key] - chrono::steady_clock::now();
-//             auto timeleft = chrono::duration_cast<chrono::seconds>(timestamp).count();
-//             str= to_string(timeleft);
-//         }
-//         send(fd, str.c_str(), str.size(), 0); 
-//     }
-//     else send(fd, "NULL\n", 5, 0); ????????
-// }
+class KVstore{
+private:
+    mutex mtx;
+    unordered_map<string,string> store;
+    unordered_map<string,chrono::steady_clock::time_point> expiry;
+public:
+    void funcSET(char buffer[], int fd);
+    void funcGET(char buffer[], int fd);
+    void funcDEL(char buffer[], int fd);
+    void funcEXPIRE(char buffer[], int fd);
+};
 
-void funcSET(char buffer[], int fd){
+void KVstore::funcSET(char buffer[], int fd){
     char key[100] , value[100];
     sscanf(buffer, "%*s %s %[^\n]", key, value);
     {
@@ -53,7 +37,7 @@ void funcSET(char buffer[], int fd){
     send(fd, "OK\n", 3, 0);
 }
 
-void funcEXPIRE(char buffer[], int fd){
+void KVstore::funcEXPIRE(char buffer[], int fd){
     char key[100];
     int value;
     sscanf(buffer, "%*s %s %d", key, &value);
@@ -69,7 +53,7 @@ void funcEXPIRE(char buffer[], int fd){
     send(fd, "OK\n", 3, 0);
 }
 
-void funcGET(char buffer[], int fd){
+void KVstore::funcGET(char buffer[], int fd){
     char key[100];
     sscanf(buffer,"%*s %s", key);
     
@@ -91,7 +75,7 @@ void funcGET(char buffer[], int fd){
     }
 }
 
-void funcDEL(char buffer[], int fd){
+void KVstore::funcDEL(char buffer[], int fd){
     char key[100];
     sscanf(buffer,"%*s %s", key);
     {
@@ -104,6 +88,8 @@ void funcDEL(char buffer[], int fd){
 }
 
 void handleClient(int client_fd){
+    KVstore kv;
+
     char buffer[1024];
     while(true){
         memset(buffer, 0 , sizeof(buffer));
@@ -114,16 +100,15 @@ void handleClient(int client_fd){
         char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
         sscanf(buffer,"%s", cmd);
         
-        if(strcmp(cmd,"SET") == 0) funcSET(buffer,client_fd);
-        else if(strcmp(cmd,"GET") == 0) funcGET(buffer,client_fd);
-        else if(strcmp(cmd,"DEL") == 0) funcDEL(buffer,client_fd);
-        else if(strcmp(cmd,"EXPIRE") == 0) funcEXPIRE(buffer,client_fd);
-        // else if(strcmp(cmd,"TIMELEFT") == 0) funcTIMELEFT(buffer,client_fd); TT
+        if(strcmp(cmd,"SET") == 0) kv.funcSET(buffer,client_fd);
+        else if(strcmp(cmd,"GET") == 0) kv.funcGET(buffer,client_fd);
+        else if(strcmp(cmd,"DEL") == 0) kv.funcDEL(buffer,client_fd);
+        else if(strcmp(cmd,"EXPIRE") == 0) kv.funcEXPIRE(buffer,client_fd);
         else send(client_fd, "command not found!!\n", 20, 0);
     }
     close(client_fd);
-
 }
+
 int main(int argc , char* argv[]){
     
     if(argc < 2){
@@ -155,7 +140,7 @@ int main(int argc , char* argv[]){
     }
     cout << "Server running on " << port << endl;
     
-      while(true){
+    while(true){
         int client_fd = accept(sock_fd,NULL,NULL);
         if(client_fd < 0) perror("accept failed");
         else printf("Connected\n ");

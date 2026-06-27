@@ -47,3 +47,30 @@ void funcDEL(char buffer[]){
     }
     send(client_fd, "OK\n", 3, 0);
 }
+
+
+void funcTIMELEFT(char buffer[], int fd){
+    char key[100];
+    sscanf(buffer, "%*s %s", key);
+    bool found;
+    {
+        lock_guard<mutex> lock(mtx);
+        auto exp = expiry.find(key);
+        found = (exp != expiry.end());
+        if(found){
+            if(exp->second <= chrono::steady_clock::now()) 
+                found = false;
+        }
+    }
+    if(found){
+        string str;
+        {
+            lock_guard<mutex> lock(mtx);
+            auto timestamp = expiry[key] - chrono::steady_clock::now();
+            auto timeleft = chrono::duration_cast<chrono::seconds>(timestamp).count();
+            str= to_string(timeleft);
+        }
+        send(fd, str.c_str(), str.size(), 0); 
+    }
+    else send(fd, "NULL\n", 5, 0); ????????
+}
