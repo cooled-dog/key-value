@@ -45,20 +45,31 @@ class LRUcache{
         LRUcache(int cap) : capacity(cap) , shards(NUM_SHARDS){}
         void funcSET(char key[] , char value[]);
         string funcGET(char key[]);
-        void funcDEL(char key[]);
+        bool funcDEL(char key[]);
         bool funcEXPIRE(char key[], int value);
 };
 
 class KVstore{
     private:
         LRUcache cache;
-        
+        mutex file_mtx;
+        ofstream aofFile;
     public:
-        KVstore(int cap) : cache(cap){}
+        KVstore(int cap) : cache(cap){
+            aofFile.open("logsfile.aof", ios::app);
+        }
         void handleClient(int client_fd);
+        void addlog(const string& buffer);
 };
 
+void KVstore::addlog(const string& buffer){
+    lock_guard<mutex> lock(file_mtx);
+    aofFile << buffer;
+    aofFile.flush();
+}
+
 void KVstore::handleClient(int client_fd){
+    if(!aofFile) perror("Cannot open AOF file\n");
     char buffer[1024];
     while(true){
         memset(buffer, 0 , sizeof(buffer));
@@ -68,12 +79,11 @@ void KVstore::handleClient(int client_fd){
 
         char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
         sscanf(buffer,"%s", cmd);
-        ofstream aofFile("logs.aof", ios::app);
         if(strcmp(cmd,"SET") == 0){
             char key[100] , value[100];
             sscanf(buffer, "%*s %s %[^\n]", key, value);
             cache.funcSET(key,value);
-            aofFile << buffer << "\n";
+            addlog(buffer);
             send(client_fd,"OK\n", 3 , 0);
         }
         else if(strcmp(cmd,"GET") == 0){ 
@@ -85,9 +95,9 @@ void KVstore::handleClient(int client_fd){
         else if(strcmp(cmd,"DEL") == 0){
             char key[100];
             sscanf(buffer,"%*s %s", key);
-            cache.funcDEL(key);
+            bool ok = cache.funcDEL(key);
+            if(ok) addlog(buffer); 
             send(client_fd, "OK\n", 3, 0);
-            aofFile << buffer << "\n";
         }
         else if(strcmp(cmd,"EXPIRE") == 0){
             char key[100];
@@ -96,9 +106,9 @@ void KVstore::handleClient(int client_fd){
             bool ok = cache.funcEXPIRE(key, value);
             
             if(ok){
-                aofFile << buffer << "\n";    
+                addlog(buffer);    
                 send(client_fd, "OK\n", 3, 0);
-            }
+            }    
             else send(client_fd, "No key entry!\n", 14, 0);
         }
         else send(client_fd, "command not found!!\n", 20, 0);
@@ -143,17 +153,18 @@ string LRUcache::funcGET(char key[]){
     return (it->second.first + "\n");
 }
 
-void LRUcache::funcDEL(char key[]){
+bool LRUcache::funcDEL(char key[]){
     Shard& shard = shards[whichShard(key)];
     lock_guard<mutex> lock(shard.mtx);
 
     auto it = shard.store.find(key);
     if(it == shard.store.end()){
-        return;
+        return false;
     }
     shard.dll.erase(it->second.second);
     shard.store.erase(it);
     shard.expiry.erase(key);
+    return true;
 }
 
 bool LRUcache::funcEXPIRE(char key[], int value){
