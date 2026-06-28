@@ -54,18 +54,48 @@ class KVstore{
         LRUcache cache;
         mutex file_mtx;
         ofstream aofFile;
+        void recover(){
+            ifstream readFile("logsfile.aof");
+            string line;
+            while(getline(readFile,line)){
+                executeCommand(line);
+            }
+        }
     public:
         KVstore(int cap) : cache(cap){
+            recover();
             aofFile.open("logsfile.aof", ios::app);
         }
         void handleClient(int client_fd);
         void addlog(const string& buffer);
+        void executeCommand(const string& line);
 };
 
 void KVstore::addlog(const string& buffer){
     lock_guard<mutex> lock(file_mtx);
     aofFile << buffer;
     aofFile.flush();
+}
+
+void KVstore::executeCommand(const string& line){
+    char cmd[10];
+    sscanf(line.c_str(),"%s", cmd);
+    if(strcmp(cmd,"SET") == 0){
+        char key[100], value[100];
+        sscanf(line.c_str(), "%*s %s %[^\n]", key, value);
+        cache.funcSET(key,value);
+    }
+    else if(strcmp(cmd,"DEL") == 0){
+        char key[100];
+        sscanf(line.c_str(),"%*s %s", key);
+        cache.funcDEL(key);
+    }
+    else if(strcmp(cmd,"EXPIRE") == 0){
+        char key[100];
+        int value;
+        sscanf(line.c_str(), "%*s %s %d", key, &value);
+        cache.funcEXPIRE(key, value);
+    }
 }
 
 void KVstore::handleClient(int client_fd){
@@ -135,7 +165,6 @@ void LRUcache::funcSET(char key[] , char value[]){
 string LRUcache::funcGET(char key[]){
     Shard& shard = shards[whichShard(key)];
     lock_guard<mutex> lock(shard.mtx);
-    
     auto it = shard.store.find(key);
     if(it == shard.store.end()){
         return "NULL\n";
