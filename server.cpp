@@ -5,6 +5,7 @@
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<string>
+#include<vector>
 #include<cstring>
 #include<unordered_map>
 #include<thread>
@@ -14,30 +15,37 @@
 #include<list>
 
 using namespace std;
+static const int NUM_SHARDS = 10;
+
+int whichShard(char key[]){
+    return hash<string>{}(key) % NUM_SHARDS; 
+}
+
+struct Shard{
+    mutex mtx;
+    unordered_map<string,chrono::steady_clock::time_point> expiry;
+    unordered_map<string,pair<string,list<string>::iterator>> store;
+    list<string> dll;
+};
 
 class LRUcache{
     private:
-        mutex mtx;
-        unordered_map<string,chrono::steady_clock::time_point> expiry;
-        unordered_map<string, pair<string,list<string>::iterator>> store;
-        
         int capacity;
-        list<string> dll;
-
-        void checkRemove(){
-            if(store.size() > capacity){
-                string temp = dll.back();
-                dll.pop_back();
-                store.erase(temp);
-                expiry.erase(temp);
+        vector<Shard> shards;
+        void evictOne(Shard& shard){
+            if(shard.store.size() > capacity){
+                string temp = shard.dll.back();
+                shard.dll.pop_back();
+                shard.store.erase(temp);
+                shard.expiry.erase(temp);
             }
         }
     public:
-        LRUcache(int cap) : capacity(cap){}
-        void funcSET(char buffer[], int fd);
-        void funcGET(char buffer[], int fd);
-        void funcDEL(char buffer[], int fd);
-        void funcEXPIRE(char buffer[], int fd);
+        LRUcache(int cap) : capacity(cap) , shards(NUM_SHARDS){}
+        void funcSET(char key[] , char value[]);
+        string funcGET(char key[]);
+        void funcDEL(char key[]);
+        bool funcEXPIRE(char key[], int value);
 };
 
 class KVstore{
@@ -61,104 +69,105 @@ void KVstore::handleClient(int client_fd){
         sscanf(buffer,"%s", cmd);
         
         if(strcmp(cmd,"SET") == 0){
-            cache.funcSET(buffer,client_fd);
+            char key[100] , value[100];
+            sscanf(buffer, "%*s %s %[^\n]", key, value);
+            cache.funcSET(key,value);
+            send(client_fd,"OK\n", 3 , 0);
         }
         else if(strcmp(cmd,"GET") == 0){ 
-            cache.funcGET(buffer,client_fd);
+            char key[100];
+            sscanf(buffer,"%*s %s", key);
+            string str = cache.funcGET(key);
+            send(client_fd, str.c_str(), str.size() , 0);
         }
         else if(strcmp(cmd,"DEL") == 0){
-            cache.funcDEL(buffer,client_fd);
+            char key[100];
+            sscanf(buffer,"%*s %s", key);
+            cache.funcDEL(key);
+            send(client_fd, "OK\n", 3, 0);
         }
         else if(strcmp(cmd,"EXPIRE") == 0){
-            cache.funcEXPIRE(buffer,client_fd);
+            char key[100];
+            int value;
+            sscanf(buffer, "%*s %s %d", key, &value);
+            bool ok = cache.funcEXPIRE(key, value);
+            
+            if(ok) send(client_fd, "OK\n", 3, 0);
+            else send(client_fd, "No key entry!\n", 14, 0);
         }
         else send(client_fd, "command not found!!\n", 20, 0);
     }
     close(client_fd);
 }
 
-void LRUcache::funcSET(char buffer[], int fd){
-    char key[100] , value[100];
-    sscanf(buffer, "%*s %s %[^\n]", key, value);
-    {
-        lock_guard<mutex> lock(mtx);
-        if(store.find(key) != store.end())
-            dll.erase(store[key].second);
+void LRUcache::funcSET(char key[] , char value[]){
+    Shard& shard = shards[whichShard(key)];
+    lock_guard<mutex> lock(shard.mtx);
 
-        dll.push_front(key);
-        store[key] = {value, dll.begin()};
-        checkRemove();
+    auto it = shard.store.find(key);
+    if(it != shard.store.end()){
+        shard.dll.erase(it->second.second);
+        shard.expiry.erase(key);
     }
-    send(fd, "OK\n", 3, 0);
+
+    shard.dll.push_front(key);
+    shard.store[key] = {value, shard.dll.begin()};
+    while(shard.store.size() > capacity)
+        evictOne(shard);
 }
 
-void LRUcache::funcGET(char buffer[], int fd){
-    char key[100];
-    sscanf(buffer,"%*s %s", key);
+string LRUcache::funcGET(char key[]){
+    Shard& shard = shards[whichShard(key)];
+    lock_guard<mutex> lock(shard.mtx);
     
-    lock_guard<mutex> lock(mtx);
-
-    auto it = store.find(key);
-    if(it == store.end()){
-        send(fd, "NULL\n", 5, 0);
-        return;
+    auto it = shard.store.find(key);
+    if(it == shard.store.end()){
+        return "NULL\n";
     }
-    auto exp = expiry.find(key);
-    if(exp != expiry.end() && chrono::steady_clock::now() >= exp->second){
-        dll.erase(it->second.second);
-        store.erase(key);
-        expiry.erase(key);
-        send(fd, "NULL\n", 5, 0);
-        return;
+    auto exp = shard.expiry.find(key);
+    if(exp != shard.expiry.end() && chrono::steady_clock::now() >= exp->second){
+        shard.dll.erase(it->second.second);
+        shard.store.erase(it);
+        shard.expiry.erase(key);
+        return "NULL\n";
     }
-    else{
-        send(fd, it->second.first.c_str(), it->second.first.size(), 0);
-        send(fd, "\n", 1, 0);
-    }
-    dll.erase(it->second.second);
-    dll.push_front(key);
-    it->second.second = dll.begin();
+    shard.dll.erase(it->second.second);
+    shard.dll.push_front(key);
+    it->second.second = shard.dll.begin();
+    return (it->second.first + "\n");
 }
 
-void LRUcache::funcDEL(char buffer[], int fd){
-    char key[100];
-    sscanf(buffer,"%*s %s", key);
-    {
-        lock_guard<mutex> lock(mtx);
-        if(store.find(key) != store.end()){
-            auto it = store.find(key);
-            dll.erase(it->second.second);
-            store.erase(it);
-        }
-        if(expiry.find(key) != expiry.end())
-            expiry.erase(key);
+void LRUcache::funcDEL(char key[]){
+    Shard& shard = shards[whichShard(key)];
+    lock_guard<mutex> lock(shard.mtx);
+
+    auto it = shard.store.find(key);
+    if(it == shard.store.end()){
+        return;
     }
-    send(fd, "OK\n", 3, 0);
+    shard.dll.erase(it->second.second);
+    shard.store.erase(it);
+    shard.expiry.erase(key);
 }
 
-void LRUcache::funcEXPIRE(char buffer[], int fd){
-    char key[100];
-    int value;
-    sscanf(buffer, "%*s %s %d", key, &value);
-    {
-        lock_guard<mutex> lock(mtx);
-        auto it = store.find(key);
-        if(it == store.end()){
-            send(fd, "entry not found!\n", 17, 0);
-            return;
-        }
-        expiry[key] = chrono::steady_clock::now() + chrono::seconds(value);
+bool LRUcache::funcEXPIRE(char key[], int value){
+    Shard& shard = shards[whichShard(key)];
+    lock_guard<mutex> lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if(it == shard.store.end()){
+        return false;
     }
-    send(fd, "OK\n", 3, 0);
+    shard.expiry[key] = chrono::steady_clock::now() + chrono::seconds(value);
+    return true;
 }
 
 int main(int argc , char* argv[]){
-    if(argc < 2){
-        fprintf(stderr, "Port not mentioned, code terminated \n");
-        exit(1);
-    }
+    int port;
+    if(argc < 2)
+        port = 6379;
+    else
+        port = atoi(argv[1]);
     
-    int port = stoi(argv[1]);
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(sock_fd < 0){
         perror("socket failed");
