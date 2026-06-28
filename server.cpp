@@ -1,4 +1,5 @@
 #include<iostream>
+#include<fstream>
 #include<cstdlib>
 #include<unistd.h>
 #include<arpa/inet.h>
@@ -67,11 +68,12 @@ void KVstore::handleClient(int client_fd){
 
         char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
         sscanf(buffer,"%s", cmd);
-        
+        ofstream aofFile("logs.aof");
         if(strcmp(cmd,"SET") == 0){
             char key[100] , value[100];
             sscanf(buffer, "%*s %s %[^\n]", key, value);
             cache.funcSET(key,value);
+            aofFile << buffer << "\n";
             send(client_fd,"OK\n", 3 , 0);
         }
         else if(strcmp(cmd,"GET") == 0){ 
@@ -85,6 +87,7 @@ void KVstore::handleClient(int client_fd){
             sscanf(buffer,"%*s %s", key);
             cache.funcDEL(key);
             send(client_fd, "OK\n", 3, 0);
+            aofFile << buffer << "\n";
         }
         else if(strcmp(cmd,"EXPIRE") == 0){
             char key[100];
@@ -92,7 +95,10 @@ void KVstore::handleClient(int client_fd){
             sscanf(buffer, "%*s %s %d", key, &value);
             bool ok = cache.funcEXPIRE(key, value);
             
-            if(ok) send(client_fd, "OK\n", 3, 0);
+            if(ok){
+                aofFile << buffer << "\n";    
+                send(client_fd, "OK\n", 3, 0);
+            }
             else send(client_fd, "No key entry!\n", 14, 0);
         }
         else send(client_fd, "command not found!!\n", 20, 0);
