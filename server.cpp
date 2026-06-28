@@ -68,7 +68,7 @@ void KVstore::handleClient(int client_fd){
 
         char cmd[10] = {0} , key[100] = {0} , value[100] = {0};
         sscanf(buffer,"%s", cmd);
-        ofstream aofFile("logs.aof");
+        ofstream aofFile("logs.aof", ios::app);
         if(strcmp(cmd,"SET") == 0){
             char key[100] , value[100];
             sscanf(buffer, "%*s %s %[^\n]", key, value);
